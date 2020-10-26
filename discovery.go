@@ -1,9 +1,7 @@
 package pex
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"github.com/libp2p/go-libp2p-core/discovery"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
@@ -24,11 +22,14 @@ var pdLog = logrus.WithFields(logrus.Fields{
 })
 
 type PEXDiscovery struct {
-	bootstrapNodes []ma.Multiaddr
-	host           host.Host
-	peersMutex     sync.RWMutex
-	newPeers       map[string]*newPeersChannelWrapper
-	peers          map[string][]*peerInfo
+	bootstrapNodes          []ma.Multiaddr
+	host                    host.Host
+	peersMutex              sync.RWMutex
+	newPeers                map[string]*newPeersChannelWrapper
+	peers                   map[string][]*peerInfo
+	ticker                  *time.Ticker
+	updateStopper           chan bool
+	discoveryNetworkManager *DiscoveryNetworkManager
 }
 
 type newPeersChannelWrapper struct {
@@ -37,8 +38,9 @@ type newPeersChannelWrapper struct {
 	maxCount        int
 }
 
-func NewPEXDiscovery(h host.Host, bootstrapNodes []ma.Multiaddr) (*PEXDiscovery, error) {
+func NewPEXDiscovery(h host.Host, bootstrapNodes []ma.Multiaddr, updateInterval time.Duration) (*PEXDiscovery, error) {
 	pd := &PEXDiscovery{host: h, peers: map[string][]*peerInfo{}, newPeers: map[string]*newPeersChannelWrapper{}}
+	pd.discoveryNetworkManager = NewPEXDiscoveryNetwork(context.TODO(), pd)
 	for _, addr := range bootstrapNodes {
 		peerAddr, err := peer.AddrInfoFromP2pAddr(addr)
 		if err != nil {
@@ -51,7 +53,34 @@ func NewPEXDiscovery(h host.Host, bootstrapNodes []ma.Multiaddr) (*PEXDiscovery,
 	}
 	h.SetStreamHandler(PEXProtocolID, pd.handleStream)
 	pd.bootstrapNodes = bootstrapNodes
+	pd.updateStopper = pd.startAsyncPeerListUpdater(updateInterval)
 	return pd, nil
+}
+
+func (pd *PEXDiscovery) startAsyncPeerListUpdater(updateInterval time.Duration) chan bool {
+	stopper := make(chan bool, 1)
+	go func() {
+		ticker := time.NewTicker(updateInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopper:
+				{
+					pdLog.Debug("peer list updater has stopped")
+					return
+				}
+			case <-ticker.C:
+				{
+					pd.updatePeerList()
+				}
+			}
+		}
+	}()
+	return stopper
+}
+
+func (pd *PEXDiscovery) updatePeerList() {
+	// TODO
 }
 
 func (pd *PEXDiscovery) Advertise(ctx context.Context, ns string, opts ...discovery.Option) (time.Duration, error) {
@@ -64,18 +93,21 @@ func (pd *PEXDiscovery) Advertise(ctx context.Context, ns string, opts ...discov
 			Addrs: pd.host.Addrs(),
 		}, dOpts.Ttl,
 	}
+
+	// TODO advertise not only to bootstrap nodes, but also to random network neighbours (by network id)
 	for _, addr := range pd.bootstrapNodes {
 		bAddrInfo, err := peer.AddrInfoFromP2pAddr(addr)
 		if err != nil {
 			return 0, err
 		}
-		stream, err := pd.host.NewStream(ctx, bAddrInfo.ID, PEXProtocolID)
-		if err != nil {
-			return 0, err
+
+		msg := &PEXMessage{
+			Type:      MessageTypeAdvertise,
+			NetworkID: ns,
+			PeerInfo:  pInfo,
 		}
 
-		sw := newStreamWrapper(context.TODO(), stream)
-		err = sw.Advertise(ns, pInfo)
+		err = pd.discoveryNetworkManager.sendMessage(context.TODO(), bAddrInfo.ID, msg)
 		if err != nil {
 			return 0, err
 		}
@@ -127,111 +159,62 @@ func (pd *PEXDiscovery) getPeers(ns string, count int) []peerInfo {
 }
 
 func (pd *PEXDiscovery) handleStream(stream network.Stream) {
-	rw := bufio.NewReadWriter(bufio.NewReader(stream), bufio.NewWriter(stream))
-	go pd.readData(context.TODO(), rw)
+	go pd.discoveryNetworkManager.handleNewStream(stream)
 }
 
-func (pd *PEXDiscovery) readData(ctx context.Context, rw *bufio.ReadWriter) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			{
-				data, err := rw.ReadString('\n')
-				if err != nil {
-					swLog.Warn("unable to read message: ", err.Error())
-					return // we do it because probably stream was closed
-				}
-				if data == "" {
-					swLog.Debug("received message with empty content")
-					break
-				}
-				if data != "\n" {
-					var msg message
-					err = json.Unmarshal([]byte(data), &msg)
-					if err != nil {
-						swLog.Warn("unable to unmarshal message: ", err.Error())
-						break
-					}
-					go pd.handleMessage(rw, &msg)
-				} else {
-					swLog.Warn("incorrect data received")
-					break
-				}
-			}
-		}
+type Handler func(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error)
+
+func (pd *PEXDiscovery) getHandlerForType(msgType uint8) Handler {
+	switch msgType {
+	case MessageTypeAdvertise:
+		return pd.handleAdvertise
+	case MessageTypeGetPeers:
+		return pd.handleGetPeers
+	case MessageTypePing:
+		return pd.handleGetPeers
+	default:
+		return nil
 	}
 }
 
-func (pd *PEXDiscovery) handleMessage(rw *bufio.ReadWriter, msg *message) {
-	switch msg.Type {
-	case "request_peers":
-		{
-			peers := pd.getPeers(msg.Payload["ns"].(string), msg.Payload["count"].(int))
-			var resp message
-			resp.Payload = map[string]interface{}{}
-			resp.ID = msg.ID
-			resp.Type = "request_peers"
-			peersJson, err := json.Marshal(peers)
-			if err != nil {
-				pdLog.Warn("cannot marshal peer list: " + err.Error())
-				return
-			}
-			resp.Payload["peers"] = peersJson
-			mResp, err := json.Marshal(resp)
-			if err != nil {
-				pdLog.Warn("cannot marshal response: " + err.Error())
-				return
-			}
-			_, err = rw.Write(mResp)
-			if err != nil {
-				pdLog.Warn("cannot send response: " + err.Error())
-				return
-			}
+func (pd *PEXDiscovery) handleAdvertise(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
+	pd.peersMutex.RLock()
+	for i, v := range pd.peers[msg.NetworkID] {
+		peerArr := pd.peers[msg.NetworkID]
+		pd.peersMutex.Lock()
+		if v.ID.String() == msg.PeerInfo.ID.String() {
+			// delete old peer info
+			peerArr[i] = peerArr[len(peerArr)-1]
+			peerArr[len(peerArr)-1] = nil
+			peerArr = peerArr[:len(peerArr)-1]
 		}
-	case "advertise":
-		{
-			ns := msg.Payload["ns"].(string)
-			peerInfoStr := msg.Payload["peerInfo"].(string)
-			var peerInfo peerInfo
-			err := json.Unmarshal([]byte(peerInfoStr), &peerInfo)
-			if err != nil {
-				pdLog.Warn("cannot unmarshal peerInfo: " + err.Error())
-				return
+		peerArr = append(peerArr, &msg.PeerInfo)
+		pd.peers[msg.NetworkID] = peerArr
+		pd.peersMutex.Unlock()
+		if v, ok := pd.newPeers[msg.NetworkID]; ok {
+			v.count++
+			if v.count > v.maxCount {
+				close(v.NewPeersChannel)
+				delete(pd.newPeers, msg.NetworkID)
+				continue
 			}
-			pd.peersMutex.RLock()
-			for i, v := range pd.peers[ns] {
-				if v.ID.String() == peerInfo.ID.String() {
-					pd.peersMutex.Lock()
-					peerArr := pd.peers[ns]
-
-					// delete old info and update peer
-					peerArr[i] = peerArr[len(peerArr)-1]
-					peerArr[len(peerArr)-1] = nil
-					peerArr = peerArr[:len(peerArr)-1]
-					peerArr = append(peerArr, &peerInfo)
-					pd.peers[ns] = peerArr
-					pd.peersMutex.Unlock()
-				} else {
-					// add new peer
-					pd.peersMutex.Lock()
-					peerArr := pd.peers[ns]
-					peerArr = append(peerArr, &peerInfo)
-					pd.peers[ns] = peerArr
-					pd.peersMutex.Unlock()
-					if v, ok := pd.newPeers[ns]; ok {
-						v.count++
-						if v.count > v.maxCount {
-							close(v.NewPeersChannel)
-							delete(pd.newPeers, ns)
-							continue
-						}
-						v.NewPeersChannel <- peerInfo.AddrInfo
-					}
-				}
-			}
-			pd.peersMutex.RUnlock()
+			v.NewPeersChannel <- msg.PeerInfo.AddrInfo
 		}
 	}
+	pd.peersMutex.RUnlock()
+	return nil, nil
+}
+
+func (pd *PEXDiscovery) handleGetPeers(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
+	peers := pd.getPeers(msg.NetworkID, int(msg.GetPeersCount))
+	return &PEXMessage{
+		Type:  MessageTypeGetPeers,
+		Peers: peers,
+	}, nil
+}
+
+func (pd *PEXDiscovery) handlePing(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
+	return &PEXMessage{
+		Type: MessageTypePong,
+	}, nil
 }
