@@ -7,6 +7,7 @@ import (
 
 type peerInfo struct {
 	peer.AddrInfo
-	TTL     time.Duration
-	AddedTs time.Time `msgpack:"-"`
+	TTL       time.Duration
+	NetworkID string
+	AddedTs   time.Time `json:"-"`
 }
