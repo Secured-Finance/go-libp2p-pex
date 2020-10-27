@@ -117,30 +117,29 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 	}
 }
 
-// sendRequest sends out a request, but also makes sure to
-// measure the RTT for latency measurements.
-func (pdn *DiscoveryNetworkManager) sendRequest(ctx context.Context, p peer.ID, pmes *PEXMessage) (*PEXMessage, error) {
+// sendRequest sends out a request
+func (pdn *DiscoveryNetworkManager) sendRequest(ctx context.Context, p peer.ID, msg *PEXMessage) (*PEXMessage, error) {
 	ms, err := pdn.createStreamWrapper(p)
 	if err != nil {
 		return nil, err
 	}
 
-	rpmes, err := ms.SendRequest(ctx, pmes)
+	resp, err := ms.SendRequest(ctx, msg)
 	if err != nil {
 		return nil, err
 	}
 
-	return rpmes, nil
+	return resp, nil
 }
 
-// sendMessage sends out a message
+// sendMessage sends out a message without waiting for response
 func (pdn *DiscoveryNetworkManager) sendMessage(ctx context.Context, p peer.ID, pmes *PEXMessage) error {
-	ms, err := pdn.createStreamWrapper(p)
+	sw, err := pdn.createStreamWrapper(p)
 	if err != nil {
 		return err
 	}
 
-	if err := ms.SendMessage(ctx, pmes); err != nil {
+	if err := sw.SendMessage(ctx, pmes); err != nil {
 		return err
 	}
 	return nil
@@ -148,24 +147,24 @@ func (pdn *DiscoveryNetworkManager) sendMessage(ctx context.Context, p peer.ID, 
 
 func (pdn *DiscoveryNetworkManager) createStreamWrapper(p peer.ID) (*StreamWrapper, error) {
 	pdn.streamMapMutex.Lock()
-	ms, ok := pdn.streamMap[p]
+	sw, ok := pdn.streamMap[p]
 	if ok {
 		pdn.streamMapMutex.Unlock()
-		return ms, nil
+		return sw, nil
 	}
-	ms = &StreamWrapper{peerID: p, host: pdn.pex.host}
-	pdn.streamMap[p] = ms
+	sw = &StreamWrapper{peerID: p, host: pdn.pex.host}
+	pdn.streamMap[p] = sw
 	pdn.streamMapMutex.Unlock()
 
-	if err := ms.initOrInvalidate(); err != nil {
+	if err := sw.initOrInvalidate(); err != nil {
 		pdn.streamMapMutex.Lock()
 		defer pdn.streamMapMutex.Unlock()
 
-		msCur := pdn.streamMap[p]
+		swCur := pdn.streamMap[p]
 		// Changed. Use the new one, old one is invalid and
 		// not in the map so we can just throw it away.
-		if ms != msCur {
-			return msCur, nil
+		if sw != swCur {
+			return swCur, nil
 		}
 		// Not changed, remove the now invalid stream from the
 		// map.
@@ -175,7 +174,7 @@ func (pdn *DiscoveryNetworkManager) createStreamWrapper(p peer.ID) (*StreamWrapp
 	// Invalid but not in map. Must have been removed by a disconnect.
 
 	// All ready to go.
-	return ms, nil
+	return sw, nil
 }
 
 type StreamWrapper struct {

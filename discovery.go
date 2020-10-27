@@ -15,6 +15,8 @@ import (
 
 const (
 	PEXProtocolID = "/pex/1.0.0"
+
+	DefaultGetPeersMaxCount = 30
 )
 
 var pdLog = logrus.WithFields(logrus.Fields{
@@ -26,6 +28,7 @@ type PEXDiscovery struct {
 	host                    host.Host
 	peersMutex              sync.RWMutex
 	newPeers                map[string]*newPeersChannelWrapper
+	newPeersMutex           sync.RWMutex
 	peers                   map[string][]*peerInfo
 	ticker                  *time.Ticker
 	updateStopper           chan bool
@@ -81,6 +84,71 @@ func (pd *PEXDiscovery) startAsyncPeerListUpdater(updateInterval time.Duration) 
 
 func (pd *PEXDiscovery) updatePeerList() {
 	// TODO
+	pd.peersMutex.RLock()
+	defer pd.peersMutex.RUnlock()
+	for networkID, peers := range pd.peers {
+		for i, p := range peers {
+			// invalidate peers which have expired ttl
+			if time.Since(p.AddedTs) > p.TTL {
+				pd.peersMutex.RUnlock()
+				pd.peersMutex.Lock()
+				peers = pd.deletePeer(peers, i)
+				pd.peers[networkID] = peers
+				pd.peersMutex.Unlock()
+				pd.peersMutex.RLock()
+			}
+		}
+
+		go func(peers []*peerInfo, networkID string) {
+			pd.peersMutex.RLock()
+			peerListSize := len(peers)
+			rand.Seed(time.Now().Unix())
+			// select random peer from our list
+			randomPeerIndex := rand.Intn(peerListSize - 1)
+			pingMessage := &PEXMessage{
+				Type: MessageTypePing,
+			}
+
+			// ping him
+			resp, err := pd.discoveryNetworkManager.sendRequest(context.TODO(), peers[randomPeerIndex].ID, pingMessage)
+			if err != nil {
+				pd.peersMutex.RUnlock()
+				pd.peersMutex.Lock()
+				pd.peers[networkID] = pd.deletePeer(peers, randomPeerIndex)
+				pd.peersMutex.Unlock()
+				return
+			}
+			if resp.Type != MessageTypePong {
+				pd.peersMutex.RUnlock()
+				pd.peersMutex.Lock()
+				pd.peers[networkID] = pd.deletePeer(peers, randomPeerIndex)
+				pd.peersMutex.Unlock()
+				return
+			}
+
+			// get new peers from him
+			getPeersMessage := &PEXMessage{
+				Type:          MessageTypeGetPeers,
+				GetPeersCount: DefaultGetPeersMaxCount,
+				NetworkID:     networkID,
+			}
+			resp, err = pd.discoveryNetworkManager.sendRequest(context.TODO(), peers[randomPeerIndex].ID, getPeersMessage)
+			if err != nil {
+				pd.peersMutex.RUnlock()
+				pd.peersMutex.Lock()
+				pd.peers[networkID] = pd.deletePeer(peers, randomPeerIndex)
+				pd.peersMutex.Unlock()
+				return
+			}
+			for _, newPeer := range resp.Peers {
+				newPeer.AddedTs = time.Now().UTC()
+				pd.peersMutex.RUnlock()
+				pd.peersMutex.Lock()
+				pd.peers[networkID] = append(pd.peers[networkID], &newPeer)
+				pd.peersMutex.Unlock()
+			}
+		}(peers, networkID)
+	}
 }
 
 func (pd *PEXDiscovery) Advertise(ctx context.Context, ns string, opts ...discovery.Option) (time.Duration, error) {
@@ -91,7 +159,7 @@ func (pd *PEXDiscovery) Advertise(ctx context.Context, ns string, opts ...discov
 		peer.AddrInfo{
 			ID:    pd.host.ID(),
 			Addrs: pd.host.Addrs(),
-		}, dOpts.Ttl,
+		}, dOpts.Ttl, time.Time{},
 	}
 
 	// TODO advertise not only to bootstrap nodes, but also to random network neighbours (by network id)
@@ -127,7 +195,7 @@ func (pd *PEXDiscovery) FindPeers(ctx context.Context, ns string, opts ...discov
 	return pd.newPeers[ns].NewPeersChannel, nil
 }
 
-func (pd *PEXDiscovery) getPeers(ns string, count int) []peerInfo {
+func (pd *PEXDiscovery) getPeers(ns string, maxCount int) []peerInfo {
 	pd.peersMutex.RLock()
 	defer pd.peersMutex.RUnlock()
 
@@ -138,22 +206,26 @@ func (pd *PEXDiscovery) getPeers(ns string, count int) []peerInfo {
 		return peers
 	}
 
+	curCount := 0
+
 	// randomly select peers which we have
-	for i := 0; i < count; i++ {
-		if p, ok := pd.peers[ns]; ok {
-			randPeerNumber := rand.Intn(len(pd.peers[ns]) - 1)
-			pinfo := p[randPeerNumber]
-			var isAlreadyExistInResList bool
-			for _, v := range peers {
-				if v.ID.String() == pinfo.ID.String() {
-					isAlreadyExistInResList = true
-				}
-			}
-			if isAlreadyExistInResList {
-				continue
-			}
-			peers = append(peers, *pinfo)
+	for _, _ = range pd.peers[ns] {
+		curCount++
+		if curCount > maxCount {
+			break
 		}
+		randPeerNumber := rand.Intn(len(pd.peers[ns]) - 1)
+		peerInfo := pd.peers[ns][randPeerNumber]
+		var isAlreadyExistInResList bool
+		for _, v := range peers {
+			if v.ID.String() == peerInfo.ID.String() {
+				isAlreadyExistInResList = true
+			}
+		}
+		if isAlreadyExistInResList {
+			continue
+		}
+		peers = append(peers, *peerInfo)
 	}
 	return peers
 }
@@ -179,19 +251,25 @@ func (pd *PEXDiscovery) getHandlerForType(msgType uint8) Handler {
 
 func (pd *PEXDiscovery) handleAdvertise(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
 	pd.peersMutex.RLock()
+	defer pd.peersMutex.RUnlock()
 	for i, v := range pd.peers[msg.NetworkID] {
-		peerArr := pd.peers[msg.NetworkID]
+		peers := pd.peers[msg.NetworkID]
+		pd.peersMutex.RUnlock()
 		pd.peersMutex.Lock()
 		if v.ID.String() == msg.PeerInfo.ID.String() {
 			// delete old peer info
-			peerArr[i] = peerArr[len(peerArr)-1]
-			peerArr[len(peerArr)-1] = nil
-			peerArr = peerArr[:len(peerArr)-1]
+			peers = pd.deletePeer(peers, i)
 		}
-		peerArr = append(peerArr, &msg.PeerInfo)
-		pd.peers[msg.NetworkID] = peerArr
+		peers = append(peers, &msg.PeerInfo)
+		pd.peers[msg.NetworkID] = peers
 		pd.peersMutex.Unlock()
+		pd.peersMutex.RLock()
+
+		// notify subscribers about new peers
+		pd.newPeersMutex.RLock()
 		if v, ok := pd.newPeers[msg.NetworkID]; ok {
+			pd.newPeersMutex.RUnlock()
+			pd.newPeersMutex.Lock()
 			v.count++
 			if v.count > v.maxCount {
 				close(v.NewPeersChannel)
@@ -199,10 +277,19 @@ func (pd *PEXDiscovery) handleAdvertise(ctx context.Context, peerID peer.ID, msg
 				continue
 			}
 			v.NewPeersChannel <- msg.PeerInfo.AddrInfo
+			pd.newPeersMutex.Unlock()
+			pd.newPeersMutex.RLock()
 		}
+		pd.newPeersMutex.RUnlock()
 	}
-	pd.peersMutex.RUnlock()
 	return nil, nil
+}
+
+func (pd *PEXDiscovery) deletePeer(peers []*peerInfo, i int) []*peerInfo {
+	peers[i] = peers[len(peers)-1]
+	peers[len(peers)-1] = nil
+	peers = peers[:len(peers)-1]
+	return peers
 }
 
 func (pd *PEXDiscovery) handleGetPeers(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
