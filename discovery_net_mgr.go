@@ -2,6 +2,7 @@ package pex
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	ctxio "github.com/jbenet/go-context/io"
 	"github.com/libp2p/go-libp2p-core/host"
@@ -9,7 +10,6 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-msgio"
 	"github.com/sirupsen/logrus"
-	"github.com/vmihailenco/msgpack/v5"
 	"io"
 	"sync"
 	"time"
@@ -45,7 +45,7 @@ var dnLog = logrus.WithFields(logrus.Fields{
 
 type PEXMessage struct {
 	Type          uint8
-	PeerInfo      peerInfo
+	PeerInfo      *peerInfo
 	Peers         []peerInfo
 	GetPeersCount uint
 	NetworkID     string
@@ -73,7 +73,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 			return
 		}
 
-		err = msgpack.Unmarshal(bMsg, pmes)
+		err = json.Unmarshal(bMsg, pmes)
 		if err != nil {
 			s.Reset()
 			dnLog.Debugf("cannot unmarshal received message: %s", err.Error())
@@ -103,7 +103,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		}
 
 		// send out response msg
-		bResp, err := msgpack.Marshal(resp)
+		bResp, err := json.Marshal(resp)
 		if err != nil {
 			s.Reset()
 			dnLog.Errorf("response marshalling error: %s", err)
@@ -244,7 +244,7 @@ func (sw *StreamWrapper) SendMessage(ctx context.Context, msg *PEXMessage) error
 			return err
 		}
 
-		bMsg, err := msgpack.Marshal(msg)
+		bMsg, err := json.Marshal(msg)
 		if err != nil {
 			return err
 		}
@@ -283,7 +283,7 @@ func (sw *StreamWrapper) SendRequest(ctx context.Context, msg *PEXMessage) (*PEX
 			return nil, err
 		}
 
-		bMsg, err := msgpack.Marshal(msg)
+		bMsg, err := json.Marshal(msg)
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +306,7 @@ func (sw *StreamWrapper) SendRequest(ctx context.Context, msg *PEXMessage) (*PEX
 			sw.stream = nil
 
 			if didRetry {
-				dnLog.Warn("error reading message, bailing stream: %s\n", err)
+				dnLog.Warnf("error reading message, bailing stream: %s", err.Error())
 
 				return nil, err
 			} else {
@@ -337,7 +337,7 @@ func (sw *StreamWrapper) ctxReadMsg(ctx context.Context, msg *PEXMessage) error 
 			errc <- err
 			return
 		}
-		err = msgpack.Unmarshal(bMsg, msg)
+		err = json.Unmarshal(bMsg, msg)
 		errc <- err
 	}(sw.streamReader)
 
