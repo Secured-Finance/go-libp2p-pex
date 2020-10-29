@@ -1,6 +1,7 @@
 package pex
 
 import (
+	"container/list"
 	"context"
 	crand "crypto/rand"
 	"encoding/binary"
@@ -11,10 +12,10 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	ma "github.com/multiformats/go-multiaddr"
-	"github.com/sasha-s/go-deadlock"
 	"github.com/sirupsen/logrus"
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -48,26 +49,60 @@ var pdLog = logrus.WithFields(logrus.Fields{
 	"subsystem": "pex",
 })
 
+type synchronizedList struct {
+	*list.List
+	mutex *sync.RWMutex
+}
+
+func (sl *synchronizedList) elementAt(i int) *list.Element {
+	if i >= sl.Len() {
+		return nil
+	}
+	curIndex := 0
+	firstIndexPassed := false
+	var res *list.Element
+	for e := sl.Front(); e != nil; e = e.Next() {
+		if firstIndexPassed {
+			curIndex++
+		} else {
+			firstIndexPassed = true
+		}
+
+		if i == curIndex {
+			res = e
+			break
+		} else {
+			continue
+		}
+	}
+	return res
+}
+
+func (sl *synchronizedList) deleteElement(e *list.Element) interface{} {
+	sl.mutex.Lock()
+	defer sl.mutex.Unlock()
+	v := sl.Remove(e)
+	return v
+}
+
 type PEXDiscovery struct {
 	bootstrapNodes          []ma.Multiaddr
 	host                    host.Host
-	peersMutex              deadlock.RWMutex
-	newPeers                map[string]*newPeersChannelWrapper
-	newPeersMutex           deadlock.RWMutex
-	peers                   map[string][]*peerInfo
-	ticker                  *time.Ticker
+	newPeers                sync.Map
+	peers                   sync.Map
 	updateStopper           chan bool
 	discoveryNetworkManager *DiscoveryNetworkManager
 }
 
 type newPeersChannelWrapper struct {
-	NewPeersChannel chan peer.AddrInfo
-	count           int
-	maxCount        int
+	Channel  chan peer.AddrInfo
+	count    int
+	maxCount int
+	mutex    sync.Mutex
 }
 
 func NewPEXDiscovery(h host.Host, bootstrapNodes []ma.Multiaddr, updateInterval time.Duration) (*PEXDiscovery, error) {
-	pd := &PEXDiscovery{host: h, peers: map[string][]*peerInfo{}, newPeers: map[string]*newPeersChannelWrapper{}}
+	pd := &PEXDiscovery{host: h}
 	pd.discoveryNetworkManager = NewPEXDiscoveryNetwork(context.TODO(), pd)
 	for _, addr := range bootstrapNodes {
 		peerAddr, err := peer.AddrInfoFromP2pAddr(addr)
@@ -109,8 +144,6 @@ func (pd *PEXDiscovery) startAsyncPeerListUpdater(updateInterval time.Duration) 
 
 func (pd *PEXDiscovery) updatePeerList() {
 	// TODO
-	pd.peersMutex.RLock()
-	defer pd.peersMutex.RUnlock()
 
 	if pd.bootstrapNodes != nil {
 		for _, n := range pd.bootstrapNodes {
@@ -133,58 +166,65 @@ func (pd *PEXDiscovery) updatePeerList() {
 			}
 
 			// add new peers to peer list
-			pd.peersMutex.RUnlock()
 			for _, newPeer := range resp.Peers {
 				newPeer.AddedTs = time.Now().UTC()
-				pd.addOrUpdatePeer(newPeer.NetworkID, &newPeer)
+				pd.addOrUpdatePeer(newPeer.NetworkID, newPeer)
 			}
-			pd.peersMutex.RLock()
 		}
 	}
 
-	for networkID, peers := range pd.peers {
-		for i, p := range peers {
-			// invalidate peers which have expired ttl
-			if p.TTL == 0 {
+	pd.peers.Range(func(networkID, value interface{}) bool {
+		peers := value.(*synchronizedList)
+
+		// invalidate peers which have expired ttl
+		peers.mutex.RLock()
+		for e := peers.Front(); e != nil; e = e.Next() {
+			peer := e.Value.(*peerInfo)
+			if peer.TTL == 0 {
 				continue
 			}
-			if time.Since(p.AddedTs) > p.TTL {
-				pd.peersMutex.RUnlock()
-				peers = pd.deletePeer(peers, i)
-				pd.peers[networkID] = peers
-				pd.peersMutex.RLock()
+			if time.Since(peer.AddedTs) > peer.TTL {
+				// remove expired peer
+				peers.mutex.RUnlock()
+				peers.deleteElement(e)
+				peers.mutex.RLock()
 			}
 		}
+		peers.mutex.RUnlock()
 
-		go func(peers []*peerInfo, networkID string) {
-			pd.peersMutex.RLock()
-			peerListSize := len(peers)
+		go func(networkID string, peers *synchronizedList) {
+			peers.mutex.RLock()
+			peerListSize := peers.Len()
 
-			// select random peer from our list
 			if peerListSize == 0 {
+				peers.mutex.RUnlock()
 				return
 			}
 
+			// select random peer from our list
 			randomPeerIndex := Random.Intn(peerListSize)
+
+			el := peers.elementAt(randomPeerIndex)
+			p := el.Value.(*peerInfo)
+			peers.mutex.RUnlock()
 
 			pingMessage := &PEXMessage{
 				Type: MessageTypePing,
 			}
 
 			// ping him
-			resp, err := pd.discoveryNetworkManager.sendRequest(context.TODO(), peers[randomPeerIndex].ID, pingMessage)
+			resp, err := pd.discoveryNetworkManager.sendRequest(context.TODO(), p.AddrInfo.ID, pingMessage)
 			if err != nil {
-				pdLog.Debugf("failed to send ping to %s: %s, we are %s", peers[randomPeerIndex].ID, err, pd.host.ID())
-				pd.peersMutex.RUnlock()
-				pdLog.Debugf("deleting peer %s", peers[randomPeerIndex].ID)
-				pd.peers[networkID] = pd.deletePeer(peers, randomPeerIndex)
+				pdLog.Debugf("failed to send ping to %s: %s, we are %s", p.AddrInfo.ID, err, pd.host.ID())
+				pdLog.Debugf("deleting peer %s", p.AddrInfo.ID)
+				peers.deleteElement(el)
 				return
 			}
+
 			if resp.Type != MessageTypePong {
 				pdLog.Debugf("incorrect ping response")
-				pd.peersMutex.RUnlock()
-				pdLog.Debugf("deleting peer %s", peers[randomPeerIndex].ID)
-				pd.peers[networkID] = pd.deletePeer(peers, randomPeerIndex)
+				pdLog.Debugf("deleting peer %s", p.AddrInfo.ID)
+				peers.deleteElement(el)
 				return
 			}
 
@@ -194,25 +234,22 @@ func (pd *PEXDiscovery) updatePeerList() {
 				GetPeersCount: DefaultGetPeersMaxCount,
 				NetworkID:     networkID,
 			}
-			resp, err = pd.discoveryNetworkManager.sendRequest(context.TODO(), peers[randomPeerIndex].ID, getPeersMessage)
+			resp, err = pd.discoveryNetworkManager.sendRequest(context.TODO(), p.AddrInfo.ID, getPeersMessage)
 			if err != nil {
-				pdLog.Debugf("failed to send get peers request: %s", err)
-				pd.peersMutex.RUnlock()
-				pd.peersMutex.Lock()
-				pdLog.Debugf("deleting peer %s", peers[randomPeerIndex].ID)
-				pd.peers[networkID] = pd.deletePeer(peers, randomPeerIndex)
-				pd.peersMutex.Unlock()
+				pdLog.Debugf("failed to send get peers request to %s: %s, we are %s", p.AddrInfo.ID, err, pd.host.ID())
+				pdLog.Debugf("deleting peer %s", p.AddrInfo.ID)
+				peers.deleteElement(el)
 				return
 			}
 
-			// add new peers to peer list
-			pd.peersMutex.RUnlock()
 			for _, newPeer := range resp.Peers {
 				newPeer.AddedTs = time.Now().UTC()
-				pd.addOrUpdatePeer(newPeer.NetworkID, &newPeer)
+				pd.addOrUpdatePeer(newPeer.NetworkID, newPeer)
 			}
-		}(peers, networkID)
-	}
+		}(networkID.(string), peers)
+
+		return true
+	})
 }
 
 func (pd *PEXDiscovery) Advertise(ctx context.Context, ns string, opts ...discovery.Option) (time.Duration, error) {
@@ -252,70 +289,81 @@ func (pd *PEXDiscovery) FindPeers(ctx context.Context, ns string, opts ...discov
 	dOpts := discovery.Options{}
 	_ = dOpts.Apply(opts...)
 
-	pd.newPeers[ns] = &newPeersChannelWrapper{
-		NewPeersChannel: make(chan peer.AddrInfo),
-		maxCount:        dOpts.Limit,
-	}
-	return pd.newPeers[ns].NewPeersChannel, nil
+	c, _ := pd.newPeers.LoadOrStore(ns, &newPeersChannelWrapper{
+		Channel:  make(chan peer.AddrInfo),
+		maxCount: dOpts.Limit,
+	})
+	nwpc := c.(*newPeersChannelWrapper)
+	return nwpc.Channel, nil
 }
 
-func (pd *PEXDiscovery) getPeers(ns string, maxCount int) []peerInfo {
-	pd.peersMutex.RLock()
-	defer pd.peersMutex.RUnlock()
+func (pd *PEXDiscovery) getPeers(requester peer.ID, ns string, maxCount int) []*peerInfo {
 
 	rand.Seed(time.Now().UnixNano())
-	var peers []peerInfo
-
-	if len(pd.peers) == 0 {
-		return peers
-	}
+	var peers []*peerInfo
 
 	curCount := 0
 
 	// randomly select peers which we have
 	if ns == "" {
-		for k, _ := range pd.peers {
-			for _, _ = range pd.peers[k] {
+		pd.peers.Range(func(networkID, value interface{}) bool {
+			peerList := value.(*synchronizedList)
+			peerList.mutex.RLock()
+			for e := peerList.Front(); e != nil; e = e.Next() {
 				curCount++
 				if curCount > maxCount {
-					break
+					return false
 				}
-
-				peerListSize := len(pd.peers[k])
-				randPeerNumber := Random.Intn(peerListSize)
-
-				peerInfo := pd.peers[k][randPeerNumber]
+				randPeerNum := Random.Intn(peerList.Len())
+				randEl := peerList.elementAt(randPeerNum)
+				p := randEl.Value.(*peerInfo)
+				if p.AddrInfo.ID.String() == requester.String() {
+					continue
+				}
 				var isAlreadyExistInResList bool
 				for _, v := range peers {
-					if v.ID.String() == peerInfo.ID.String() {
+					if v.AddrInfo.ID.String() == p.AddrInfo.ID.String() {
 						isAlreadyExistInResList = true
 					}
 				}
 				if isAlreadyExistInResList {
 					continue
 				}
-				peers = append(peers, *peerInfo)
+				peers = append(peers, p)
 			}
-		}
+			peerList.mutex.RUnlock()
+			return true
+		})
 	} else {
-		for _, _ = range pd.peers[ns] {
+		v, ok := pd.peers.Load(ns)
+		if !ok {
+			return peers
+		}
+		peerList := v.(*synchronizedList)
+		peerList.mutex.RLock()
+		for e := peerList.Front(); e != nil; e = e.Next() {
 			curCount++
 			if curCount > maxCount {
 				break
 			}
-			randPeerNumber := Random.Intn(len(pd.peers[ns]))
-			peerInfo := pd.peers[ns][randPeerNumber]
+			randPeerNum := Random.Intn(peerList.Len())
+			randEl := peerList.elementAt(randPeerNum)
+			p := randEl.Value.(*peerInfo)
+			if p.AddrInfo.ID.String() == requester.String() {
+				continue
+			}
 			var isAlreadyExistInResList bool
 			for _, v := range peers {
-				if v.ID.String() == peerInfo.ID.String() {
+				if v.AddrInfo.ID.String() == p.AddrInfo.ID.String() {
 					isAlreadyExistInResList = true
 				}
 			}
 			if isAlreadyExistInResList {
 				continue
 			}
-			peers = append(peers, *peerInfo)
+			peers = append(peers, p)
 		}
+		peerList.mutex.RUnlock()
 	}
 
 	return peers
@@ -347,68 +395,52 @@ func (pd *PEXDiscovery) handleAdvertise(ctx context.Context, peerID peer.ID, msg
 	return nil, nil
 }
 
-func (pd *PEXDiscovery) addOrUpdatePeer(networkID string, peerInfo *peerInfo) {
-	if peerInfo.ID == pd.host.ID() {
+func (pd *PEXDiscovery) addOrUpdatePeer(networkID string, pi *peerInfo) {
+	if pi == nil {
 		return
 	}
-	peerInfo.NetworkID = networkID
 
-	pd.peersMutex.RLock()
-	for i, v := range pd.peers[networkID] {
-		peers := pd.peers[networkID]
-		if v.ID.String() == peerInfo.ID.String() {
-			// delete old peer info
+	if pi.AddrInfo.ID.String() == pd.host.ID().String() {
+		dnLog.Debugf("Attempt to add self (%s) to peer list, we are %s", pi.AddrInfo.ID, pd.host.ID())
+		return
+	}
 
-			pd.peersMutex.RUnlock()
-			peers = pd.deletePeer(peers, i)
-			pd.peersMutex.Lock()
-			pd.peers[networkID] = peers
-			pd.peersMutex.Unlock()
-			pd.peersMutex.RLock()
+	value, _ := pd.peers.LoadOrStore(networkID, &synchronizedList{List: list.New(), mutex: &sync.RWMutex{}})
+	peers := value.(*synchronizedList)
+	peers.mutex.Lock()
+	for e := peers.Front(); e != nil; e = e.Next() {
+		peer := e.Value.(*peerInfo)
+		if peer.AddrInfo.ID.String() == pi.AddrInfo.ID.String() {
+			peers.Remove(e)
 		}
 	}
-	pd.peersMutex.RUnlock()
-	pd.host.Peerstore().AddAddrs(peerInfo.ID, peerInfo.Addrs, peerstore.ProviderAddrTTL)
-
-	pd.peersMutex.Lock()
-	pd.peers[networkID] = append(pd.peers[networkID], peerInfo)
-	pd.peersMutex.Unlock()
+	pd.host.Peerstore().AddAddrs(pi.AddrInfo.ID, pi.AddrInfo.Addrs, peerstore.ProviderAddrTTL)
+	peers.PushFront(pi)
+	peers.mutex.Unlock()
 
 	// notify subscribers about new peer
-	_ = pd.notifyAboutNewPeer(peerInfo.NetworkID, peerInfo.AddrInfo)
+	_ = pd.notifyAboutNewPeer(pi.NetworkID, pi.AddrInfo)
 }
 
 func (pd *PEXDiscovery) notifyAboutNewPeer(networkID string, addrInfo peer.AddrInfo) error {
-	pd.newPeersMutex.RLock()
-	defer pd.newPeersMutex.RUnlock()
-	if v, ok := pd.newPeers[networkID]; ok {
-		pd.newPeersMutex.RUnlock()
-		pd.newPeersMutex.Lock()
-		v.count++
-		pd.newPeersMutex.Unlock()
-		pd.newPeersMutex.RLock()
-		if v.count > v.maxCount {
-			close(v.NewPeersChannel)
-			delete(pd.newPeers, networkID)
+	if v, ok := pd.newPeers.Load(networkID); ok {
+		npcw := v.(*newPeersChannelWrapper)
+		npcw.mutex.Lock()
+		defer npcw.mutex.Unlock()
+		npcw.count++
+		if npcw.count > npcw.maxCount {
+			close(npcw.Channel)
+			pd.newPeers.Delete(networkID)
 			return fmt.Errorf("limit of found peers has reached")
 		}
-		v.NewPeersChannel <- addrInfo
+		npcw.Channel <- addrInfo
 	}
 	return nil
 }
 
-func (pd *PEXDiscovery) deletePeer(peers []*peerInfo, i int) []*peerInfo {
-	pd.peersMutex.Lock()
-	defer pd.peersMutex.Unlock()
-	peers[i] = peers[len(peers)-1]
-	peers[len(peers)-1] = nil
-	peers = peers[:len(peers)-1]
-	return peers
-}
-
 func (pd *PEXDiscovery) handleGetPeers(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
 	pdLog.Debugf("received get peers request from %s, we are %s", peerID.String(), pd.host.ID())
-	peers := pd.getPeers(msg.NetworkID, int(msg.GetPeersCount))
+	peers := pd.getPeers(peerID, msg.NetworkID, int(msg.GetPeersCount))
 	return &PEXMessage{
 		Type:  MessageTypeGetPeers,
 		Peers: peers,

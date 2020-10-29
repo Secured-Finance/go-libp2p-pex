@@ -23,6 +23,8 @@ func TestDiscovery(t *testing.T) {
 	port1 := rand.Intn(100) + 10000
 	port2 := port1 + 1
 	port3 := port2 + 1
+	port4 := port3 + 1
+	port5 := port4 + 1
 
 	bNode := makeNode(port1)
 	_, err := NewPEXDiscovery(bNode, nil, 1*time.Second)
@@ -35,6 +37,10 @@ func TestDiscovery(t *testing.T) {
 	t.Logf("Node 1 ID: %s", rNode1.ID())
 	rNode2 := makeNode(port3)
 	t.Logf("Node 2 ID: %s", rNode2.ID())
+	rNode3 := makeNode(port4)
+	t.Logf("Node 3 ID: %s", rNode3.ID())
+	rNode4 := makeNode(port5)
+	t.Logf("Node 4 ID: %s", rNode4.ID())
 
 	bootstrapMultiaddrs, err := peer.AddrInfoToP2pAddrs(&peer.AddrInfo{bNode.ID(), bNode.Addrs()})
 	if err != nil {
@@ -49,6 +55,14 @@ func TestDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	d3, err := NewPEXDiscovery(rNode3, []ma.Multiaddr{bootstrapMultiaddrs[0]}, 1*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d4, err := NewPEXDiscovery(rNode4, []ma.Multiaddr{bootstrapMultiaddrs[0]}, 1*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// setup new peers listener
 	go func() {
@@ -57,7 +71,11 @@ func TestDiscovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		for {
-			p := <-newPeers
+			p, ok := <-newPeers
+			if !ok {
+				t.Log("received all peers")
+				return
+			}
 			t.Logf("d1 new peer: %s", p)
 		}
 	}()
@@ -68,8 +86,42 @@ func TestDiscovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		for {
-			p := <-newPeers
+			p, ok := <-newPeers
+			if !ok {
+				t.Log("received all peers")
+				return
+			}
 			t.Logf("d2 new peer: %s", p)
+		}
+	}()
+
+	go func() {
+		newPeers, err := d3.FindPeers(context.TODO(), "test", discovery.Limit(10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for {
+			p, ok := <-newPeers
+			if !ok {
+				t.Log("received all peers")
+				return
+			}
+			t.Logf("d3 new peer: %s", p)
+		}
+	}()
+
+	go func() {
+		newPeers, err := d4.FindPeers(context.TODO(), "test", discovery.Limit(10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for {
+			p, ok := <-newPeers
+			if !ok {
+				t.Log("received all peers")
+				return
+			}
+			t.Logf("d4 new peer: %s", p)
 		}
 	}()
 
@@ -80,6 +132,15 @@ func TestDiscovery(t *testing.T) {
 	}
 
 	_, err = d2.Advertise(context.TODO(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = d3.Advertise(context.TODO(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d4.Advertise(context.TODO(), "test")
 	if err != nil {
 		t.Fatal(err)
 	}

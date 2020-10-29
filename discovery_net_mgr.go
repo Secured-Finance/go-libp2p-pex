@@ -44,11 +44,11 @@ var dnLog = logrus.WithFields(logrus.Fields{
 })
 
 type PEXMessage struct {
-	Type          uint8
-	PeerInfo      *peerInfo
-	Peers         []peerInfo
-	GetPeersCount uint
-	NetworkID     string
+	Type          uint8       `json:"type"`
+	PeerInfo      *peerInfo   `json:"peerInfo"`
+	Peers         []*peerInfo `json:"peers"`
+	GetPeersCount uint        `json:"getPeersCount"`
+	NetworkID     string      `json:"networkID"`
 }
 
 func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
