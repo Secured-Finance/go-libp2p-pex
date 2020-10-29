@@ -96,6 +96,7 @@ type PEXDiscovery struct {
 
 type newPeersChannelWrapper struct {
 	Channel  chan peer.AddrInfo
+	isClosed bool
 	count    int
 	maxCount int
 	mutex    sync.Mutex
@@ -309,6 +310,7 @@ func (pd *PEXDiscovery) getPeers(requester peer.ID, ns string, maxCount int) []*
 		pd.peers.Range(func(networkID, value interface{}) bool {
 			peerList := value.(*synchronizedList)
 			peerList.mutex.RLock()
+			defer peerList.mutex.RUnlock()
 			for e := peerList.Front(); e != nil; e = e.Next() {
 				curCount++
 				if curCount > maxCount {
@@ -331,7 +333,6 @@ func (pd *PEXDiscovery) getPeers(requester peer.ID, ns string, maxCount int) []*
 				}
 				peers = append(peers, p)
 			}
-			peerList.mutex.RUnlock()
 			return true
 		})
 	} else {
@@ -429,7 +430,10 @@ func (pd *PEXDiscovery) notifyAboutNewPeer(networkID string, addrInfo peer.AddrI
 		defer npcw.mutex.Unlock()
 		npcw.count++
 		if npcw.count > npcw.maxCount {
-			close(npcw.Channel)
+			if !npcw.isClosed {
+				close(npcw.Channel)
+				npcw.isClosed = true
+			}
 			pd.newPeers.Delete(networkID)
 			return fmt.Errorf("limit of found peers has reached")
 		}
