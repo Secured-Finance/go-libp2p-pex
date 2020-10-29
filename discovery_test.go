@@ -22,10 +22,6 @@ func TestDiscovery(t *testing.T) {
 	// setup new libp2p hosts - one bootstrap and two regular peers
 	rand.Seed(time.Now().UnixNano())
 	port1 := rand.Intn(100) + 10000
-	port2 := port1 + 1
-	port3 := port2 + 1
-	port4 := port3 + 1
-	port5 := port4 + 1
 
 	bNode := makeNode(port1)
 	_, err := NewPEXDiscovery(bNode, nil, 1*time.Second)
@@ -34,132 +30,51 @@ func TestDiscovery(t *testing.T) {
 	}
 	t.Logf("Bootstrap ID: %s", bNode.ID())
 
-	rNode1 := makeNode(port2)
-	t.Logf("Node 1 ID: %s", rNode1.ID())
-	rNode2 := makeNode(port3)
-	t.Logf("Node 2 ID: %s", rNode2.ID())
-	rNode3 := makeNode(port4)
-	t.Logf("Node 3 ID: %s", rNode3.ID())
-	rNode4 := makeNode(port5)
-	t.Logf("Node 4 ID: %s", rNode4.ID())
-
 	bootstrapMultiaddrs, err := peer.AddrInfoToP2pAddrs(&peer.AddrInfo{bNode.ID(), bNode.Addrs()})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	d1, err := NewPEXDiscovery(rNode1, []ma.Multiaddr{bootstrapMultiaddrs[0]}, 1*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d2, err := NewPEXDiscovery(rNode2, []ma.Multiaddr{bootstrapMultiaddrs[0]}, 1*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d3, err := NewPEXDiscovery(rNode3, []ma.Multiaddr{bootstrapMultiaddrs[0]}, 1*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d4, err := NewPEXDiscovery(rNode4, []ma.Multiaddr{bootstrapMultiaddrs[0]}, 1*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
+	maxNodes := 8
+	port := port1
 
 	resultingPeerSet := &sync.Map{}
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(maxNodes)
 
-	// setup new peers listener
-	go func() {
-		newPeers, err := d1.FindPeers(context.TODO(), "test", discovery.Limit(10))
+	for i := 1; i <= maxNodes; i++ {
+		port += 1
+		node := makeNode(port)
+		t.Logf("Node %d ID: %s", i, node.ID())
+		d, err := NewPEXDiscovery(node, []ma.Multiaddr{bootstrapMultiaddrs[0]}, 1*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for {
-			p, ok := <-newPeers
-			if !ok {
-				t.Log("received all peers")
-				wg.Done()
-				return
-			}
-			m, _ := resultingPeerSet.LoadOrStore(rNode1.ID(), &sync.Map{})
-			foundNodes := m.(*sync.Map)
-			foundNodes.Store(p.ID.String(), p)
-		}
-	}()
 
-	go func() {
-		newPeers, err := d2.FindPeers(context.TODO(), "test", discovery.Limit(10))
+		// setup new peers listener
+		go func() {
+			newPeers, err := d.FindPeers(context.TODO(), "test", discovery.Limit(30))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for {
+				p, ok := <-newPeers
+				if !ok {
+					t.Log("received all peers")
+					wg.Done()
+					return
+				}
+				m, _ := resultingPeerSet.LoadOrStore(node.ID(), &sync.Map{})
+				foundNodes := m.(*sync.Map)
+				foundNodes.Store(p.ID.String(), p)
+			}
+		}()
+
+		// advertise node
+		_, err = d.Advertise(context.TODO(), "test")
 		if err != nil {
 			t.Fatal(err)
 		}
-		for {
-			p, ok := <-newPeers
-			if !ok {
-				t.Log("received all peers")
-				wg.Done()
-				return
-			}
-			m, _ := resultingPeerSet.LoadOrStore(rNode2.ID(), &sync.Map{})
-			foundNodes := m.(*sync.Map)
-			foundNodes.Store(p.ID.String(), p)
-		}
-	}()
-
-	go func() {
-		newPeers, err := d3.FindPeers(context.TODO(), "test", discovery.Limit(10))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for {
-			p, ok := <-newPeers
-			if !ok {
-				t.Log("received all peers")
-				wg.Done()
-				return
-			}
-			m, _ := resultingPeerSet.LoadOrStore(rNode3.ID(), &sync.Map{})
-			foundNodes := m.(*sync.Map)
-			foundNodes.Store(p.ID.String(), p)
-		}
-	}()
-
-	go func() {
-		newPeers, err := d4.FindPeers(context.TODO(), "test", discovery.Limit(10))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for {
-			p, ok := <-newPeers
-			if !ok {
-				t.Log("received all peers")
-				wg.Done()
-				return
-			}
-			m, _ := resultingPeerSet.LoadOrStore(rNode4.ID(), &sync.Map{})
-			foundNodes := m.(*sync.Map)
-			foundNodes.Store(p.ID.String(), p)
-		}
-	}()
-
-	// do advertising for regular peers
-	_, err = d1.Advertise(context.TODO(), "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = d2.Advertise(context.TODO(), "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = d3.Advertise(context.TODO(), "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = d4.Advertise(context.TODO(), "test")
-	if err != nil {
-		t.Fatal(err)
 	}
 
 	wg.Wait()
@@ -170,8 +85,8 @@ func TestDiscovery(t *testing.T) {
 			i++
 			return true
 		})
-		if i != 3 {
-			t.Error("Expected 4 found peers, got ", i)
+		if i != maxNodes-1 {
+			t.Errorf("Expected %d found peers, got %d", maxNodes-1, i)
 		}
 		return true
 	})
