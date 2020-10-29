@@ -11,6 +11,7 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/sirupsen/logrus"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 )
@@ -64,6 +65,10 @@ func TestDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	resultingPeerSet := &sync.Map{}
+	var wg sync.WaitGroup
+	wg.Add(4)
+
 	// setup new peers listener
 	go func() {
 		newPeers, err := d1.FindPeers(context.TODO(), "test", discovery.Limit(10))
@@ -74,9 +79,12 @@ func TestDiscovery(t *testing.T) {
 			p, ok := <-newPeers
 			if !ok {
 				t.Log("received all peers")
+				wg.Done()
 				return
 			}
-			t.Logf("d1 new peer: %s", p)
+			m, _ := resultingPeerSet.LoadOrStore(rNode1.ID(), &sync.Map{})
+			foundNodes := m.(*sync.Map)
+			foundNodes.Store(p.ID.String(), p)
 		}
 	}()
 
@@ -89,9 +97,12 @@ func TestDiscovery(t *testing.T) {
 			p, ok := <-newPeers
 			if !ok {
 				t.Log("received all peers")
+				wg.Done()
 				return
 			}
-			t.Logf("d2 new peer: %s", p)
+			m, _ := resultingPeerSet.LoadOrStore(rNode2.ID(), &sync.Map{})
+			foundNodes := m.(*sync.Map)
+			foundNodes.Store(p.ID.String(), p)
 		}
 	}()
 
@@ -104,9 +115,12 @@ func TestDiscovery(t *testing.T) {
 			p, ok := <-newPeers
 			if !ok {
 				t.Log("received all peers")
+				wg.Done()
 				return
 			}
-			t.Logf("d3 new peer: %s", p)
+			m, _ := resultingPeerSet.LoadOrStore(rNode3.ID(), &sync.Map{})
+			foundNodes := m.(*sync.Map)
+			foundNodes.Store(p.ID.String(), p)
 		}
 	}()
 
@@ -119,9 +133,12 @@ func TestDiscovery(t *testing.T) {
 			p, ok := <-newPeers
 			if !ok {
 				t.Log("received all peers")
+				wg.Done()
 				return
 			}
-			t.Logf("d4 new peer: %s", p)
+			m, _ := resultingPeerSet.LoadOrStore(rNode4.ID(), &sync.Map{})
+			foundNodes := m.(*sync.Map)
+			foundNodes.Store(p.ID.String(), p)
 		}
 	}()
 
@@ -145,7 +162,19 @@ func TestDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	select {}
+	wg.Wait()
+	resultingPeerSet.Range(func(key, value interface{}) bool {
+		i := 0
+		foundNodes := value.(*sync.Map)
+		foundNodes.Range(func(key, value interface{}) bool {
+			i++
+			return true
+		})
+		if i != 3 {
+			t.Error("Expected 4 found peers, got ", i)
+		}
+		return true
+	})
 }
 
 func makeNode(port int) host.Host {
