@@ -52,8 +52,8 @@ func TestDiscovery(t *testing.T) {
 		}
 
 		// setup new peers listener
-		go func() {
-			newPeers, err := d.FindPeers(context.TODO(), "test", discovery.Limit(30))
+		go func(i int) {
+			newPeers, err := d.FindPeers(context.TODO(), "test", discovery.Limit(maxNodes-1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -68,7 +68,7 @@ func TestDiscovery(t *testing.T) {
 				foundNodes := m.(*sync.Map)
 				foundNodes.Store(p.ID.String(), p)
 			}
-		}()
+		}(i)
 
 		// advertise node
 		_, err = d.Advertise(context.TODO(), "test")
@@ -78,13 +78,14 @@ func TestDiscovery(t *testing.T) {
 	}
 
 	wg.Wait()
-	resultingPeerSet.Range(func(key, value interface{}) bool {
+	resultingPeerSet.Range(func(node, value interface{}) bool {
 		i := 0
 		foundNodes := value.(*sync.Map)
 		foundNodes.Range(func(key, value interface{}) bool {
 			i++
 			return true
 		})
+
 		if i != maxNodes-1 {
 			t.Errorf("Expected %d found peers, got %d", maxNodes-1, i)
 		}

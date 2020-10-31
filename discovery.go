@@ -299,43 +299,30 @@ func (pd *PEXDiscovery) FindPeers(ctx context.Context, ns string, opts ...discov
 }
 
 func (pd *PEXDiscovery) getPeers(requester peer.ID, ns string, maxCount int) []*peerInfo {
-
-	rand.Seed(time.Now().UnixNano())
 	var peers []*peerInfo
 
-	curCount := 0
+	peerStack := newStack()
 
-	// randomly select peers which we have
 	if ns == "" {
+		// randomly select n count of peers from each network which we know about
+		// this process is called "bootstrapping"
 		pd.peers.Range(func(networkID, value interface{}) bool {
 			peerList := value.(*synchronizedList)
 			peerList.mutex.RLock()
 			defer peerList.mutex.RUnlock()
+
 			for e := peerList.Front(); e != nil; e = e.Next() {
-				curCount++
-				if curCount > maxCount {
-					return false
-				}
-				randPeerNum := Random.Intn(peerList.Len())
-				randEl := peerList.elementAt(randPeerNum)
-				p := randEl.Value.(*peerInfo)
+				p := e.Value.(*peerInfo)
 				if p.AddrInfo.ID.String() == requester.String() {
 					continue
 				}
-				var isAlreadyExistInResList bool
-				for _, v := range peers {
-					if v.AddrInfo.ID.String() == p.AddrInfo.ID.String() {
-						isAlreadyExistInResList = true
-					}
-				}
-				if isAlreadyExistInResList {
-					continue
-				}
-				peers = append(peers, p)
+				peerStack.Push(p)
 			}
 			return true
 		})
 	} else {
+		// randomly select n count of peers from specific network
+		// this is necessary so that the requesting peer can update its table with possible new peers
 		v, ok := pd.peers.Load(ns)
 		if !ok {
 			return peers
@@ -343,28 +330,22 @@ func (pd *PEXDiscovery) getPeers(requester peer.ID, ns string, maxCount int) []*
 		peerList := v.(*synchronizedList)
 		peerList.mutex.RLock()
 		for e := peerList.Front(); e != nil; e = e.Next() {
-			curCount++
-			if curCount > maxCount {
-				break
-			}
-			randPeerNum := Random.Intn(peerList.Len())
-			randEl := peerList.elementAt(randPeerNum)
-			p := randEl.Value.(*peerInfo)
+			p := e.Value.(*peerInfo)
 			if p.AddrInfo.ID.String() == requester.String() {
 				continue
 			}
-			var isAlreadyExistInResList bool
-			for _, v := range peers {
-				if v.AddrInfo.ID.String() == p.AddrInfo.ID.String() {
-					isAlreadyExistInResList = true
-				}
-			}
-			if isAlreadyExistInResList {
-				continue
-			}
-			peers = append(peers, p)
+			peerStack.Push(p)
 		}
 		peerList.mutex.RUnlock()
+	}
+
+	peerStack.Shuffle()
+	for i := 0; i < maxCount; i++ {
+		p := peerStack.Pop()
+		if p == nil {
+			break
+		}
+		peers = append(peers, p.(*peerInfo))
 	}
 
 	return peers
@@ -406,6 +387,7 @@ func (pd *PEXDiscovery) addOrUpdatePeer(networkID string, pi *peerInfo) {
 		return
 	}
 
+	var peerAlreadyExists bool
 	value, _ := pd.peers.LoadOrStore(networkID, &synchronizedList{List: list.New(), mutex: &sync.RWMutex{}})
 	peers := value.(*synchronizedList)
 	peers.mutex.Lock()
@@ -413,6 +395,7 @@ func (pd *PEXDiscovery) addOrUpdatePeer(networkID string, pi *peerInfo) {
 		peer := e.Value.(*peerInfo)
 		if peer.AddrInfo.ID.String() == pi.AddrInfo.ID.String() {
 			peers.Remove(e)
+			peerAlreadyExists = true
 		}
 	}
 	pd.host.Peerstore().AddAddrs(pi.AddrInfo.ID, pi.AddrInfo.Addrs, peerstore.ProviderAddrTTL)
@@ -420,7 +403,9 @@ func (pd *PEXDiscovery) addOrUpdatePeer(networkID string, pi *peerInfo) {
 	peers.mutex.Unlock()
 
 	// notify subscribers about new peer
-	_ = pd.notifyAboutNewPeer(pi.NetworkID, pi.AddrInfo)
+	if !peerAlreadyExists {
+		_ = pd.notifyAboutNewPeer(pi.NetworkID, pi.AddrInfo)
+	}
 }
 
 func (pd *PEXDiscovery) notifyAboutNewPeer(networkID string, addrInfo peer.AddrInfo) error {
@@ -429,7 +414,10 @@ func (pd *PEXDiscovery) notifyAboutNewPeer(networkID string, addrInfo peer.AddrI
 		npcw.mutex.Lock()
 		defer npcw.mutex.Unlock()
 		npcw.count++
-		if npcw.count > npcw.maxCount {
+		npcw.Channel <- addrInfo
+		if npcw.count >= npcw.maxCount {
+			// weird bug when it closes the closed channel, because for some weird reason channel wrapper wasn't deleted from newPeers map
+			// TODO probably need to investigate it in future
 			if !npcw.isClosed {
 				close(npcw.Channel)
 				npcw.isClosed = true
@@ -437,7 +425,6 @@ func (pd *PEXDiscovery) notifyAboutNewPeer(networkID string, addrInfo peer.AddrI
 			pd.newPeers.Delete(networkID)
 			return fmt.Errorf("limit of found peers has reached")
 		}
-		npcw.Channel <- addrInfo
 	}
 	return nil
 }
