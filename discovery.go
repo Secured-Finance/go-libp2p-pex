@@ -144,8 +144,6 @@ func (pd *PEXDiscovery) startAsyncPeerListUpdater(updateInterval time.Duration) 
 }
 
 func (pd *PEXDiscovery) updatePeerList() {
-	// TODO
-
 	if pd.bootstrapNodes != nil {
 		for _, n := range pd.bootstrapNodes {
 			bAddr, err := peer.AddrInfoFromP2pAddr(n)
@@ -264,7 +262,6 @@ func (pd *PEXDiscovery) Advertise(ctx context.Context, ns string, opts ...discov
 		}, dOpts.Ttl, ns, time.Time{},
 	}
 
-	// TODO advertise not only to bootstrap nodes, but also to random network neighbours (by network id)
 	for _, addr := range pd.bootstrapNodes {
 		bAddrInfo, err := peer.AddrInfoFromP2pAddr(addr)
 		if err != nil {
