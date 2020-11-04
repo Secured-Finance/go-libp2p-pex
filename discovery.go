@@ -412,15 +412,17 @@ func (pd *PEXDiscovery) notifyAboutNewPeer(networkID string, addrInfo peer.AddrI
 		defer npcw.mutex.Unlock()
 		npcw.count++
 		npcw.Channel <- addrInfo
-		if npcw.count >= npcw.maxCount {
-			// weird bug when it closes the closed channel, because for some weird reason channel wrapper wasn't deleted from newPeers map
-			// TODO probably need to investigate it in future
-			if !npcw.isClosed {
-				close(npcw.Channel)
-				npcw.isClosed = true
+		if npcw.maxCount > 0 {
+			if npcw.count >= npcw.maxCount {
+				// weird bug when it closes the closed channel, because for some weird reason channel wrapper wasn't deleted from newPeers map
+				// TODO probably need to investigate it in future
+				if !npcw.isClosed {
+					close(npcw.Channel)
+					npcw.isClosed = true
+				}
+				pd.newPeers.Delete(networkID)
+				return fmt.Errorf("limit of found peers has reached")
 			}
-			pd.newPeers.Delete(networkID)
-			return fmt.Errorf("limit of found peers has reached")
 		}
 	}
 	return nil
