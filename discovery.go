@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	PEXProtocolID = "/pex/1.0.0"
+	PEXProtocolID = "/pex/2.0.0"
 
 	DefaultGetPeersMaxCount = 30
 )
@@ -256,10 +256,10 @@ func (pd *PEXDiscovery) Advertise(ctx context.Context, ns string, opts ...discov
 	_ = dOpts.Apply(opts...)
 
 	pInfo := peerInfo{
-		peer.AddrInfo{
+		addrInfo(peer.AddrInfo{
 			ID:    pd.host.ID(),
 			Addrs: pd.host.Addrs(),
-		}, dOpts.Ttl, ns, time.Time{},
+		}), dOpts.Ttl, ns, time.Time{},
 	}
 
 	for _, addr := range pd.bootstrapNodes {
@@ -401,7 +401,7 @@ func (pd *PEXDiscovery) addOrUpdatePeer(networkID string, pi *peerInfo) {
 
 	// notify subscribers about new peer
 	if !peerAlreadyExists {
-		_ = pd.notifyAboutNewPeer(pi.NetworkID, pi.AddrInfo)
+		_ = pd.notifyAboutNewPeer(pi.NetworkID, peer.AddrInfo(pi.AddrInfo))
 	}
 }
 

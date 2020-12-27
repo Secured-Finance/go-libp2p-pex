@@ -35,7 +35,7 @@ func TestDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	maxNodes := 8
+	maxNodes := 200
 	port := port1
 
 	resultingPeerSet := &sync.Map{}

@@ -2,8 +2,8 @@ package pex
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/fxamacker/cbor/v2"
 	ctxio "github.com/jbenet/go-context/io"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
@@ -73,7 +73,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 			return
 		}
 
-		err = json.Unmarshal(bMsg, pmes)
+		err = cbor.Unmarshal(bMsg, pmes)
 		if err != nil {
 			s.Reset()
 			dnLog.Debugf("cannot unmarshal received message: %s", err.Error())
@@ -103,7 +103,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		}
 
 		// send out response msg
-		bResp, err := json.Marshal(resp)
+		bResp, err := cbor.Marshal(resp)
 		if err != nil {
 			s.Reset()
 			dnLog.Errorf("response marshalling error: %s", err)
@@ -244,7 +244,7 @@ func (sw *StreamWrapper) SendMessage(ctx context.Context, msg *PEXMessage) error
 			return err
 		}
 
-		bMsg, err := json.Marshal(msg)
+		bMsg, err := cbor.Marshal(msg)
 		if err != nil {
 			return err
 		}
@@ -283,7 +283,7 @@ func (sw *StreamWrapper) SendRequest(ctx context.Context, msg *PEXMessage) (*PEX
 			return nil, err
 		}
 
-		bMsg, err := json.Marshal(msg)
+		bMsg, err := cbor.Marshal(msg)
 		if err != nil {
 			return nil, err
 		}
@@ -337,7 +337,7 @@ func (sw *StreamWrapper) ctxReadMsg(ctx context.Context, msg *PEXMessage) error 
 			errc <- err
 			return
 		}
-		err = json.Unmarshal(bMsg, msg)
+		err = cbor.Unmarshal(bMsg, msg)
 		errc <- err
 	}(sw.streamReader)
 

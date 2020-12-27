@@ -4,6 +4,7 @@ go 1.15
 
 require (
 	github.com/btcsuite/btcd v0.21.0-beta // indirect
+	github.com/fxamacker/cbor/v2 v2.2.0
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99
 	github.com/libp2p/go-libp2p v0.11.0
 	github.com/libp2p/go-libp2p-core v0.6.1
