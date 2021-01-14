@@ -18,4 +18,4 @@ PRs accepted.
 
 ## License
 
-MIT
+This project is licensed under the MIT license, Copyright (c) 2021 Secured Finance. For more information see LICENSE.md.
