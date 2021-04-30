@@ -3,6 +3,10 @@ package pex
 import (
 	"context"
 	"fmt"
+	"io"
+	"sync"
+	"time"
+
 	"github.com/fxamacker/cbor/v2"
 	ctxio "github.com/jbenet/go-context/io"
 	"github.com/libp2p/go-libp2p-core/host"
@@ -10,9 +14,6 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-msgio"
 	"github.com/sirupsen/logrus"
-	"io"
-	"sync"
-	"time"
 )
 
 const (
@@ -76,7 +77,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		err = cbor.Unmarshal(bMsg, pmes)
 		if err != nil {
 			s.Reset()
-			dnLog.Debugf("cannot unmarshal received message: %s", err.Error())
+			dnLog.Warnf("Cannot unmarshal received message: %s", err.Error())
 			return
 		}
 
@@ -84,7 +85,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		handler := pdn.pex.getHandlerForType(pmes.Type)
 		if handler == nil {
 			s.Reset()
-			dnLog.Debug("unknown message type")
+			dnLog.Debug("Unknown message type")
 			return
 		}
 
@@ -92,13 +93,12 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		resp, err := handler(ctx, mPeer, pmes)
 		if err != nil {
 			s.Reset()
-			dnLog.Errorf("handle message error: %s", err)
+			dnLog.Errorf("Handle message error: %s", err)
 			return
 		}
 
 		// if nil response, return it before serializing
 		if resp == nil {
-			dnLog.Debug("got nil in response")
 			continue
 		}
 
@@ -106,12 +106,12 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		bResp, err := cbor.Marshal(resp)
 		if err != nil {
 			s.Reset()
-			dnLog.Errorf("response marshalling error: %s", err)
+			dnLog.Errorf("Response marshalling error: %s", err)
 			return
 		}
 		if err := w.WriteMsg(bResp); err != nil {
 			s.Reset()
-			dnLog.Errorf("send response error: %s", err)
+			dnLog.Errorf("Send response error: %s", err)
 			return
 		}
 	}
@@ -306,17 +306,14 @@ func (sw *StreamWrapper) SendRequest(ctx context.Context, msg *PEXMessage) (*PEX
 			sw.stream = nil
 
 			if didRetry {
-				dnLog.Warnf("error reading message, bailing stream: %s", err.Error())
-
+				dnLog.Warnf("Error reading message, bailing stream: %s", err.Error())
 				return nil, err
 			} else {
-				fmt.Printf("error reading message, trying again: %s\n", err)
+				dnLog.Warnf("Error reading message, trying again: %s", err)
 				didRetry = true
 				continue
 			}
 		}
-
-		//log.Event(ctx, "cNode SentMessage", sw.cNode .self, sw.peerID, msg)
 
 		if sw.singleMes > streamReuseTries {
 			sw.stream.Close()
