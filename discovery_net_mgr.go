@@ -41,7 +41,7 @@ func NewPEXDiscoveryNetwork(ctx context.Context, pex *PEXDiscovery) *DiscoveryNe
 }
 
 var dnLog = logrus.WithFields(logrus.Fields{
-	"subsystem": "pex/discovery_network",
+	"module": "pex/network",
 })
 
 type PEXMessage struct {
@@ -77,7 +77,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		err = cbor.Unmarshal(bMsg, pmes)
 		if err != nil {
 			s.Reset()
-			dnLog.Warnf("Cannot unmarshal received message: %s", err.Error())
+			dnLog.WithField("err", err.Error()).Error("Failed to unmarshal received message")
 			return
 		}
 
@@ -85,7 +85,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		handler := pdn.pex.getHandlerForType(pmes.Type)
 		if handler == nil {
 			s.Reset()
-			dnLog.Debug("Unknown message type")
+			dnLog.WithField("type", pmes.Type).Warn("Unknown message type")
 			return
 		}
 
@@ -93,7 +93,7 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		resp, err := handler(ctx, mPeer, pmes)
 		if err != nil {
 			s.Reset()
-			dnLog.Errorf("Handle message error: %s", err)
+			dnLog.WithField("err", err.Error()).Error("Failed to handle incoming message")
 			return
 		}
 
@@ -106,12 +106,12 @@ func (pdn *DiscoveryNetworkManager) handleNewStream(s network.Stream) {
 		bResp, err := cbor.Marshal(resp)
 		if err != nil {
 			s.Reset()
-			dnLog.Errorf("Response marshalling error: %s", err)
+			dnLog.WithField("err", err.Error()).Error("Failed to marshal response message")
 			return
 		}
 		if err := w.WriteMsg(bResp); err != nil {
 			s.Reset()
-			dnLog.Errorf("Send response error: %s", err)
+			dnLog.WithField("err", err.Error()).Error("Failed to send response message")
 			return
 		}
 	}
@@ -261,8 +261,6 @@ func (sw *StreamWrapper) SendMessage(ctx context.Context, msg *PEXMessage) error
 			}
 		}
 
-		//log.Event(ctx, "cNode SentMessage", sw.cNode .self, sw.peerID, msg)
-
 		if sw.singleMes > streamReuseTries {
 			sw.stream.Close()
 			sw.stream = nil
@@ -306,10 +304,10 @@ func (sw *StreamWrapper) SendRequest(ctx context.Context, msg *PEXMessage) (*PEX
 			sw.stream = nil
 
 			if didRetry {
-				dnLog.Warnf("Error reading message, bailing stream: %s", err.Error())
+				dnLog.WithField("err", err.Error()).Warnf("Failed to read response message, bailing stream...")
 				return nil, err
 			} else {
-				dnLog.Warnf("Error reading message, trying again: %s", err)
+				dnLog.WithField("err", err.Error()).Warnf("Failed to read response message, trying again...")
 				didRetry = true
 				continue
 			}

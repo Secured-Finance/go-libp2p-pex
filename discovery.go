@@ -46,7 +46,7 @@ var (
 )
 
 var log = logrus.WithFields(logrus.Fields{
-	"subsystem": "pex",
+	"module": "pex",
 })
 
 type synchronizedList struct {
@@ -130,7 +130,7 @@ func (pd *PEXDiscovery) startAsyncPeerListUpdater(updateInterval time.Duration) 
 			select {
 			case <-stopper:
 				{
-					log.Debug("Peer list updater has stopped")
+					log.Debug("Peer list updater worker has been stopped")
 					return
 				}
 			case <-ticker.C:
@@ -214,15 +214,22 @@ func (pd *PEXDiscovery) updatePeerList() {
 			// ping him
 			resp, err := pd.discoveryNetworkManager.sendRequest(context.TODO(), p.AddrInfo.ID, pingMessage)
 			if err != nil {
-				log.Debugf("Failed to send Ping to %s: %s", p.AddrInfo.ID, err)
-				log.Debugf("Deleting peer %s", p.AddrInfo.ID)
+				log.WithFields(logrus.Fields{
+					"peer": p.AddrInfo.ID,
+					"err":  err.Error(),
+				}).Debugf("Failed to send Ping message")
+				log.WithField("peer", p.AddrInfo.ID).Debugf("Deleting peer from list of discovered peers", p.AddrInfo.ID)
 				peers.deleteElement(el)
 				return
 			}
 
 			if resp.Type != MessageTypePong {
-				log.Debugf("Incorrect Ping response")
-				log.Debugf("Deleting peer %s", p.AddrInfo.ID)
+				log.WithFields(logrus.Fields{
+					"peer":     p.AddrInfo.ID,
+					"expected": MessageTypePing,
+					"found":    resp.Type,
+				}).Debugf("Incorrect Ping response")
+				log.WithField("peer", p.AddrInfo.ID).Debugf("Deleting peer from list of discovered peers", p.AddrInfo.ID)
 				peers.deleteElement(el)
 				return
 			}
@@ -235,8 +242,11 @@ func (pd *PEXDiscovery) updatePeerList() {
 			}
 			resp, err = pd.discoveryNetworkManager.sendRequest(context.TODO(), p.AddrInfo.ID, getPeersMessage)
 			if err != nil {
-				log.Debugf("Failed to send GetPeers to %s: %s", p.AddrInfo.ID, err)
-				log.Debugf("Deleting peer %s", p.AddrInfo.ID)
+				log.WithFields(logrus.Fields{
+					"peer": p.AddrInfo.ID,
+					"err":  err.Error(),
+				}).Debugf("Failed to send GetPeers message")
+				log.WithField("peer", p.AddrInfo.ID).Debugf("Deleting peer from list of discovered peers", p.AddrInfo.ID)
 				peers.deleteElement(el)
 				return
 			}
@@ -368,7 +378,7 @@ func (pd *PEXDiscovery) getHandlerForType(msgType uint8) Handler {
 }
 
 func (pd *PEXDiscovery) handleAdvertise(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
-	log.Debugf("Received Advertise from %s", peerID.String())
+	log.WithField("peer", peerID.String()).Trace("Received Advertise message")
 	msg.PeerInfo.AddedTs = time.Now().UTC()
 	pd.addOrUpdatePeer(msg.NetworkID, msg.PeerInfo)
 	return nil, nil
@@ -380,7 +390,7 @@ func (pd *PEXDiscovery) addOrUpdatePeer(networkID string, pi *peerInfo) {
 	}
 
 	if pi.AddrInfo.ID.String() == pd.host.ID().String() {
-		dnLog.Debugf("Attempt to add self (%s) to peer list", pi.AddrInfo.ID)
+		dnLog.WithField("peer", pi.AddrInfo.ID).Debug("Attempt to add self to peer list")
 		return
 	}
 
@@ -429,7 +439,7 @@ func (pd *PEXDiscovery) notifyAboutNewPeer(networkID string, addrInfo peer.AddrI
 }
 
 func (pd *PEXDiscovery) handleGetPeers(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
-	log.Debugf("Received GetPeers from %s", peerID.String())
+	log.WithField("peer", peerID.String()).Trace("Received GetPeer message")
 	peers := pd.getPeers(peerID, msg.NetworkID, int(msg.GetPeersCount))
 	return &PEXMessage{
 		Type:  MessageTypeGetPeers,
@@ -438,7 +448,7 @@ func (pd *PEXDiscovery) handleGetPeers(ctx context.Context, peerID peer.ID, msg 
 }
 
 func (pd *PEXDiscovery) handlePing(ctx context.Context, peerID peer.ID, msg *PEXMessage) (*PEXMessage, error) {
-	log.Debugf("Received Ping from %s", peerID.String())
+	log.WithField("peer", peerID.String()).Trace("Received Ping message")
 	return &PEXMessage{
 		Type: MessageTypePong,
 	}, nil
